@@ -40,7 +40,7 @@ public class OracleUICustomizationService implements UICustomizationService {
     @Override
     @Transactional(readOnly = true)
     public Mono<UICustomization> getCustomization(String userId) {
-        return Mono.fromCallable(() -> customizationRepository.findByUserId(userId))
+        return Mono.fromCallable(() -> customizationRepository.findById(userId))
                 .flatMap(optional ->
                         optional.map(this::mapToUICustomization)
                                 .map(Mono::just)
@@ -62,7 +62,7 @@ public class OracleUICustomizationService implements UICustomizationService {
     @Override
     public Mono<UICustomization> updateComponentOrder(String userId, String componentId, Integer newOrder) {
         return Mono.fromCallable(() -> {
-            Optional<OracleUICustomization> customizationOpt = customizationRepository.findByUserId(userId);
+            Optional<OracleUICustomization> customizationOpt = customizationRepository.findById(userId);
 
             if (customizationOpt.isEmpty()) {
                 return null;
@@ -83,7 +83,7 @@ public class OracleUICustomizationService implements UICustomizationService {
     @Transactional
     public Mono<UICustomization> toggleComponentVisibility(String userId, String componentId) {
         return Mono.fromCallable(() -> {
-            Optional<OracleUICustomization> customization = customizationRepository.findByUserId(userId);
+            Optional<OracleUICustomization> customization = customizationRepository.findById(userId);
             if (customization.isPresent()) {
                 OracleUIComponent component = customization.get().getComponents().stream()
                         .filter(c -> c.getComponentId().equals(componentId))
@@ -108,7 +108,7 @@ public class OracleUICustomizationService implements UICustomizationService {
 
     @Override
     public Flux<UIComponent> getComponentsByType(String userId, String componentType) {
-        return Mono.fromCallable(() -> componentRepository.findByComponentTypeAndCustomization_UserId(componentType, userId))
+        return Mono.fromCallable(() -> componentRepository.findByComponentTypeAndCustomization_Id(componentType, userId))
                 .flatMapMany(Flux::fromIterable)
                 .map(this::mapToUIComponent)
                 .subscribeOn(Schedulers.boundedElastic());
@@ -126,6 +126,7 @@ public class OracleUICustomizationService implements UICustomizationService {
                 .createdAt(entity.getCreatedAt())
                 .updatedAt(entity.getUpdatedAt())
                 .version(entity.getVersion())
+                .id(entity.getId())
                 .build();
         return build;
     }

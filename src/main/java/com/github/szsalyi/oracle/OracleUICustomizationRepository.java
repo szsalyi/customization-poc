@@ -15,10 +15,10 @@ import java.util.Optional;
 @Profile("oracle")
 public interface OracleUICustomizationRepository extends JpaRepository<OracleUICustomization, String> {
     @EntityGraph(attributePaths = {"components"})
-    Optional<OracleUICustomization> findByUserId(String userId);
+    Optional<OracleUICustomization> findById(String id);
     List<OracleUICustomization> findByProfileNameContaining(String profileName);
 
     @Modifying
-    @Query("DELETE FROM OracleUICustomization u WHERE u.userId = :userId")
+    @Query("DELETE FROM OracleUICustomization u WHERE u.id = :id")
     void deleteByUserId(@Param("userId") String userId);
 }

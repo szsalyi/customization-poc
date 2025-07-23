@@ -13,6 +13,7 @@ import java.util.List;
 @NoArgsConstructor
 @AllArgsConstructor
 public class UICustomization {
+    private String id;
     private String userId;
     private String profileName;
     private List<UIComponent> components;

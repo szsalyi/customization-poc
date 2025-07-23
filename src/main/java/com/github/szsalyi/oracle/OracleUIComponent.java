@@ -15,8 +15,6 @@ import lombok.AllArgsConstructor;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.Setter;
-import org.hibernate.annotations.JdbcType;
-import org.hibernate.type.descriptor.jdbc.NumericJdbcType;
 
 import java.time.LocalDateTime;
 
@@ -54,7 +52,7 @@ public class OracleUIComponent {
     private LocalDateTime lastModified;
 
     @ManyToOne(fetch = FetchType.LAZY)
-    @JoinColumn(name = "user_id")
+    @JoinColumn(name = "customization_id")
     private OracleUICustomization customization;
 
     @PrePersist

@@ -224,7 +224,17 @@ public class CassandraUICustomizationPerformanceTest extends Simulation {
                     .check(status().in(200, 201, 409))
                     .check(responseTimeInMillis().lte(5000))
                     .check(jsonPath("$.components[0].componentId").optional().saveAs("actualComponentId"))
+                    .check(jsonPath("$.id").optional().saveAs("id"))
             )
+            .exec(session -> {
+                // Extract the ID from the response, with fallback
+                String id = session.getString("id");
+
+                return session
+                        .set("id", id)
+                        .set("hasGeneratedId", id != null)
+                        .set("creationTime", System.currentTimeMillis());
+            })
             .pause(Duration.ofMillis(500), Duration.ofSeconds(2))
 
             // Step 2: Read what we just created
@@ -237,23 +247,23 @@ public class CassandraUICustomizationPerformanceTest extends Simulation {
 
             // NEW Read 2
             .exec(http("Dashboard Reload - Read 2")
-                    .get("/api/v1/ui-customization/#{userId}")
+                    .get("/api/v1/ui-customization/#{id}")
                     .check(status().in(200, 404))
                     .check(responseTimeInMillis().lte(1000))
             )
             .pause(Duration.ofMillis(500), Duration.ofSeconds(2))
             // NEW Read 3
             .exec(http("User Profile Check - Read 3")
-                    .get("/api/v1/ui-customization/#{userId}")
+                    .get("/api/v1/ui-customization/#{id}")
                     .check(status().in(200, 404))
                     .check(responseTimeInMillis().lte(1000))
             )
             .pause(Duration.ofSeconds(1), Duration.ofSeconds(3))
             // Step 3: Update using real component ID if available
-            .doIf(session -> session.contains("actualComponentId")).then(
+            .doIf(session -> session.contains("actualComponentId") && session.contains("id")).then(
                     exec(session -> session.set("newOrder", ThreadLocalRandom.current().nextInt(1, 20)))
                             .exec(http("Update Real Component")
-                                    .patch("/api/v1/ui-customization/#{userId}/components/#{actualComponentId}/order")
+                                    .patch("/api/v1/ui-customization/#{id}/components/#{actualComponentId}/order")
                                     .queryParam("newOrder", "#{newOrder}")
                                     .check(status().in(200, 404))
                                     .check(responseTimeInMillis().lte(2000))
@@ -272,7 +282,7 @@ public class CassandraUICustomizationPerformanceTest extends Simulation {
             .feed(coordinatedUserFeeder)
             // Step 2: Read what we just created
             .exec(http("Verify Creation")
-                    .get("/api/v1/ui-customization/#{userId}")
+                    .get("/api/v1/ui-customization/#{id}")
                     .check(status().in(200, 404))
                     .check(responseTimeInMillis().lte(1000))
             )
