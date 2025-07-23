@@ -1,0 +1,71 @@
+version: '3.8'
+
+services:
+  # Oracle Database - Lightweight configuration
+  oracle:
+    image: gvenzl/oracle-free:latest
+    container_name: oracle-db
+    environment:
+      ORACLE_PASSWORD: OraclePwd123
+    ports:
+      - "1521:1521"
+    # Remove persistent volume to save space during testing
+    # volumes:
+    #   - oracle_data:/opt/oracle/oradata
+    #   - ./scripts/oracle-init.sql:/container-entrypoint-initdb.d/01-init.sql
+    shm_size: 4g
+
+  # Cassandra Database - Lightweight configuration
+  cassandra:
+    image: cassandra:4.1
+    container_name: cassandra-db
+    environment:
+      CASSANDRA_CLUSTER_NAME: poc_cluster
+      CASSANDRA_DC: datacenter1
+      CASSANDRA_RACK: rack1
+      CASSANDRA_ENDPOINT_SNITCH: GossipingPropertyFileSnitch
+      CASSANDRA_SEEDS: cassandra
+      # Memory optimizations for local testing
+      MAX_HEAP_SIZE: 2G
+      HEAP_NEWSIZE: 512m
+      JVM_OPTS: "-Xms2G -Xmx2G"
+    ports:
+      - "9042:9042"
+      - "7199:7199"  # JMX
+    # Use tmpfs for testing to save disk space
+    tmpfs:
+      - /var/lib/cassandra:size=1G,mode=1777
+    healthcheck:
+      test: ["CMD", "cqlsh", "-e", "SELECT now() FROM system.local"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  # Prometheus for metrics (lightweight)
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./config/prometheus.yml:/etc/prometheus/prometheus.yml
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=1h'  # Short retention for testing
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+
+  # Grafana for visualization (lightweight)
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_INSTALL_PLUGINS: ""  # No plugins to save space
+    # Use tmpfs for testing
+    tmpfs:
+      - /var/lib/grafana:size=100M,mode=1777

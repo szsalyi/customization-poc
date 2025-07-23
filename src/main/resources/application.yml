@@ -1,0 +1,157 @@
+spring:
+    application:
+        name: ui-customization-poc
+
+#Oracle Database Configuration
+    datasource:
+        url: jdbc:oracle:thin:@localhost:1521/FREEPDB1
+        username: poc_user
+        password: poc_password
+        driver-class-name: oracle.jdbc.OracleDriver
+        hikari:
+            maximum-pool-size: 50
+            minimum-idle: 10
+            idle-timeout: 300000
+            connection-timeout: 20000
+    jpa:
+        properties:
+          hibernate:
+            dialect: org.hibernate.dialect.OracleDialect
+        hibernate:
+          ddl-auto: validate
+        show-sql: true
+
+# Cassandra Configuration
+#     cassandra:
+#         keyspace-name: poc_keyspace
+#         contact-points: 127.0.0.1
+#         port: 9042
+#         local-datacenter: datacenter1
+#         compression: lz4
+#         request:
+#             timeout: 10s
+#             consistency: local_quorum
+#             serial-consistency: local_serial
+#         connection:
+#             connect-timeout: 10s
+#             init-query-timeout: 10s
+
+# Management and Monitoring
+    management:
+        endpoints:
+            web:
+                exposure:
+                    include: health,info,metrics,prometheus
+        endpoint:
+            health:
+                show-details: always
+                show-components: always
+        metrics:
+            export:
+                prometheus:
+                    enabled: true
+            distribution:
+                percentiles-histogram:
+                    http.server.requests: true
+                percentiles:
+                    http.server.requests: 0.5, 0.9, 0.95, 0.99
+        server:
+            port: 8081
+
+# Logging Configuration
+    logging:
+        level:
+            com.poc: INFO
+            org.springframework.data: WARN
+            org.hibernate.SQL: WARN
+            org.hibernate.type.descriptor.sql.BasicBinder: WARN
+            com.datastax.oss.driver: WARN
+        pattern:
+            console: "%d{yyyy-MM-dd HH:mm:ss} - %msg%n"
+            file: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n"
+
+# Server Configuration
+    server:
+        port: 8080
+        servlet:
+            context-path: /
+        tomcat:
+            max-connections: 1000
+            threads:
+                max: 200
+                min-spare: 10
+
+# =================================================================
+# application-oracle.yml (Oracle Profile)
+# =================================================================
+    config:
+        activate:
+            on-profile: oracle
+
+    autoconfigure:
+        exclude:
+            - org.springframework.boot.autoconfigure.cassandra.CassandraAutoConfiguration
+            - org.springframework.boot.autoconfigure.data.cassandra.CassandraDataAutoConfiguration
+            - org.springframework.boot.autoconfigure.data.cassandra.CassandraReactiveDataAutoConfiguration
+            - org.springframework.boot.actuate.autoconfigure.cassandra.CassandraHealthIndicatorAutoConfiguration
+            - org.springframework.boot.actuate.autoconfigure.cassandra.CassandraReactiveHealthIndicatorAutoConfiguration
+
+
+# =================================================================
+# application-cassandra.yml (Cassandra Profile)
+# =================================================================
+#     config:
+#         activate:
+#             on-profile: cassandra
+#
+#     autoconfigure:
+#         exclude:
+#               - org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration
+#               - org.springframework.boot.autoconfigure.orm.jpa.HibernateJpaAutoConfiguration
+#               - org.springframework.boot.autoconfigure.jdbc.DataSourceTransactionManagerAutoConfiguration
+
+# ---
+# =================================================================
+# application-performance.yml (Performance Testing Profile)
+# =================================================================
+# spring:
+#     config:
+#         activate:
+#             on-profile: performance
+#
+# jpa:
+#     hibernate:
+#         jdbc:
+#             batch_size: 50
+#     properties:
+#         hibernate:
+#             order_inserts: true
+#             order_updates: true
+#             jdbc:
+#                 batch_versioned_data: true
+#
+# data:
+#     cassandra:
+#         request:
+#             timeout: 30s
+#         connection:
+#             pool:
+#                 local:
+#                     size: 4
+#
+# logging:
+#     level:
+#         com.poc: WARN
+#         org.springframework: WARN
+#         com.datastax.oss.driver: WARN
+#
+# server:
+#     tomcat:
+#         threads:
+#             max: 500
+
+# =================================================================
+# config/prometheus.yml
+# =================================================================
+# global:
+#     scrape_interval: 15s

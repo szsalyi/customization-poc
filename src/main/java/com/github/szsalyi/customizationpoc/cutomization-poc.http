@@ -1,0 +1,53 @@
+### POST customization
+POST http://localhost:8080/api/v1/ui-customization
+Accept: application/json
+Content-Type: application/json
+
+{
+  "userId": "demo_user1",
+  "profileName": "Demo Profile",
+  "version": "v1",
+  "createdAt": "2025-07-21T09:00:00",
+  "updatedAt": "2025-07-21T09:05:00",
+  "components": [
+    {
+      "componentId": "header_1",
+      "componentType": "HEADER",
+      "name": "Main Header",
+      "displayOrder": 1,
+      "visible": true,
+      "properties": {
+        "color": "#ffffff",
+        "height": 60
+      },      "lastModified": "2025-07-21T09:00:00"
+    },
+    {
+      "componentId": "sidebar_1",
+      "componentType": "SIDEBAR",
+      "name": "Navigation Sidebar",
+      "displayOrder": 2,
+      "visible": true,
+      "properties": {
+        "color": "#ffffff",
+        "height": 60
+      },      "lastModified": "2025-07-21T09:01:00"
+    },
+    {
+      "componentId": "widget_1",
+      "componentType": "WIDGET",
+      "name": "Dashboard Widget",
+      "displayOrder": 3,
+      "visible": true,
+      "properties": {
+        "color": "#ffffff",
+        "height": 60
+      },
+      "lastModified": "2025-07-21T09:02:00"
+    }
+  ]
+}
+
+### GET customization
+GET http://localhost:8080/api/v1/ui-customization/demo_user1
+Accept: application/json
+Content-Type: application/json

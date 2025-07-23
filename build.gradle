@@ -1,0 +1,145 @@
+plugins {
+    id 'java'
+    id 'org.springframework.boot' version '3.5.3'
+    id 'io.spring.dependency-management' version '1.1.7'
+    id 'jacoco' // Code coverage
+    id 'org.sonarqube' version '4.4.1.3373' // Code quality
+    id 'io.gatling.gradle' version '3.9.5'  // Gatling plugin
+}
+
+group = 'com.github.szsalyi'
+version = '0.0.1-SNAPSHOT'
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(24)
+    }
+}
+
+repositories {
+    mavenCentral()
+}
+
+jacoco {
+    toolVersion = "0.8.8"
+}
+
+jacocoTestReport {
+    reports {
+        xml.required = true
+        html.required = true
+    }
+}
+
+dependencies {
+    implementation("org.springframework.boot:spring-boot-starter-webflux")
+    implementation("org.springframework.boot:spring-boot-starter-web")
+    implementation("org.springframework.boot:spring-boot-starter-data-jpa")
+    implementation("org.springframework.boot:spring-boot-starter-data-cassandra-reactive")
+    implementation("org.springframework.boot:spring-boot-starter-actuator")
+    implementation("io.micrometer:micrometer-registry-prometheus")
+
+    implementation("com.datastax.oss:java-driver-core:4.17.0")
+    implementation("com.datastax.oss:java-driver-mapper-runtime:4.17.0")
+
+    implementation("com.oracle.database.jdbc:ojdbc11:23.8.0.25.04")
+
+    compileOnly("org.projectlombok:lombok")
+    annotationProcessor("org.projectlombok:lombok")
+
+    implementation("jakarta.validation:jakarta.validation-api:3.1.1")
+
+    // Gatling dependencies
+    testImplementation 'io.gatling.highcharts:gatling-charts-highcharts:3.9.5'
+    testImplementation 'io.gatling:gatling-test-framework:3.9.5'
+
+    // Performance testing
+    testImplementation 'org.awaitility:awaitility:4.2.0'
+    testImplementation 'io.projectreactor:reactor-test'
+
+    testImplementation("org.springframework.boot:spring-boot-starter-test")
+    testImplementation("org.testcontainers:junit-jupiter")
+    testImplementation("org.testcontainers:oracle-xe")
+    testImplementation("org.testcontainers:cassandra")
+}
+
+tasks.register("performanceTest", Test) {
+    group = "performance"
+    useJUnitPlatform()
+    include("**/performance/**")
+    maxHeapSize = "4g"
+    systemProperty("spring.profiles.active", "performance")
+}
+
+// Task to start all dependencies (Oracle + Cassandra) via Docker Compose
+tasks.register('startDatabases', Exec) {
+    group = 'database'
+    description = 'Start Oracle and Cassandra databases via Docker Compose'
+    commandLine 'docker-compose', 'up', '-d', 'oracle', 'cassandra'
+}
+
+// Task to stop all dependencies
+tasks.register('stopDatabases', Exec) {
+    group = 'database'
+    description = 'Stop all database containers'
+    commandLine 'docker-compose', 'down'
+}
+
+// Task to run the application with performance monitoring
+tasks.register('runWithMonitoring', JavaExec) {
+    group = 'performance'
+    description = 'Run application with JFR and Prometheus monitoring'
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'com.poc.DbPerformancePocApplication'
+    jvmArgs = [
+            '-XX:+FlightRecorder',
+            '-XX:StartFlightRecording=duration=300s,filename=build/performance.jfr',
+            '-Dmanagement.endpoints.web.exposure.include=health,info,metrics,prometheus'
+    ]
+}
+
+// Task to generate performance report
+tasks.register('generatePerformanceReport', JavaExec) {
+    group = 'performance'
+    description = 'Generate comprehensive performance comparison report'
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'com.poc.performance.PerformanceReportGenerator'
+    args = ['--output=build/reports/performance-report.html']
+}
+
+// Task to run benchmark tests with different configurations
+tasks.register('benchmarkTests') {
+    group = 'performance'
+    description = 'Run all benchmark tests with different configurations'
+    dependsOn 'performanceTest'
+
+    doLast {
+        println "Benchmark tests completed. Check build/reports/tests/performanceTest for results."
+    }
+}
+
+// Task to clean performance data
+tasks.register('cleanPerformanceData', Delete) {
+    group = 'cleanup'
+    description = 'Clean all performance test data from databases'
+    delete fileTree('build/performance-data')
+}
+tasks.named('test') {
+    useJUnitPlatform()
+}
+
+// Ensure databases are running before performance tests
+tasks.named('performanceTest') {
+    dependsOn 'startDatabases'
+    finalizedBy 'generatePerformanceReport'
+}
+
+// Clean up after tests
+tasks.named('clean') {
+    dependsOn 'cleanPerformanceData'
+}
+gatling {
+    toolVersion = '3.9.5'
+    includeMainOutput = true
+    includeTestOutput = false
+}
