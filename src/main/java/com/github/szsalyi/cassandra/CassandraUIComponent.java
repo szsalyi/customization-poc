@@ -10,7 +10,13 @@ import org.springframework.data.cassandra.core.mapping.Column;
 
 
 import java.time.Instant;
+import java.util.List;
 
+/**
+ * Represents a UI component that may contain subcomponents.
+ * Example: Bank Accounts (carousel) with Main account, Euro account, Saving account as subcomponents.
+ * The subComponentOrder field allows users to customize the order of subcomponents.
+ */
 @UserDefinedType("ui_component")
 @NoArgsConstructor
 @AllArgsConstructor
@@ -42,5 +48,11 @@ public class CassandraUIComponent {
     @Column(value = "last_modified")
     @CassandraType(type = CassandraType.Name.TIMESTAMP)
     private Instant lastModified;
-}
 
+    /**
+     * List of subcomponents belonging to this component.
+     * Example: [Main account, Euro account, Saving account]
+     */
+    @CassandraType(type = CassandraType.Name.LIST, typeArguments = CassandraType.Name.UDT, userTypeName = "ui_component")
+    private List<CassandraUIComponent> subComponents;
+}

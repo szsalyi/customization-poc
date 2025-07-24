@@ -12,7 +12,8 @@ CREATE TYPE IF NOT EXISTS ui_component (
     display_order int,
     visible boolean,
     properties text,
-    last_modified timestamp
+    last_modified timestamp,
+    sub_components list<frozen<ui_component>>,
 );
 
 -- Create main table
@@ -40,16 +41,49 @@ INSERT INTO ui_customizations (user_id, profile_name, created_at, updated_at, ve
             display_order: 1,
             visible: true,
             properties: '{"color": "#ffffff", "height": 60}',
-            last_modified: toTimeStamp(now())
+            last_modified: toTimeStamp(now()),
+            sub_components: [],
         },
         {
-            component_id: 'sidebar_1',
-            component_type: 'SIDEBAR',
-            name: 'Navigation Sidebar',
+            component_id: 'carousel_1',
+            component_type: 'CAROUSEL',
+            name: 'Bank Accounts',
             display_order: 2,
             visible: true,
-            properties: '{"width": 250, "theme": "dark"}',
-            last_modified: toTimeStamp(now())
+            properties: '{"type": "carousel"}',
+            last_modified: toTimeStamp(now()),
+            sub_components: [
+                {
+                    component_id: 'main_account',
+                    component_type: 'ACCOUNT',
+                    name: 'Main Account',
+                    display_order: 1,
+                    visible: true,
+                    properties: '{"currency": "HUF"}',
+                    last_modified: toTimeStamp(now()),
+                    sub_components: [],
+                },
+                {
+                    component_id: 'euro_account',
+                    component_type: 'ACCOUNT',
+                    name: 'Euro Account',
+                    display_order: 2,
+                    visible: true,
+                    properties: '{"currency": "EUR"}',
+                    last_modified: toTimeStamp(now()),
+                    sub_components: [],
+                },
+                {
+                    component_id: 'saving_account',
+                    component_type: 'ACCOUNT',
+                    name: 'Saving Account',
+                    display_order: 3,
+                    visible: true,
+                    properties: '{"currency": "HUF"}',
+                    last_modified: toTimeStamp(now()),
+                    sub_components: [],
+                }
+            ],
         },
         {
             component_id: 'widget_1',
@@ -58,7 +92,8 @@ INSERT INTO ui_customizations (user_id, profile_name, created_at, updated_at, ve
             display_order: 3,
             visible: true,
             properties: '{"type": "chart", "data": "sales"}',
-            last_modified: toTimeStamp(now())
+            last_modified: toTimeStamp(now()),
+            sub_components: [],
         }
     ]
 );
