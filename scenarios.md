@@ -1083,3 +1083,21 @@ HTTP/1.1 200 OK
 ETag: "collection-xyz789"
 Conflict:
 HTTP/1.1 412 Precondition Failed
+
+
+---------------
+
+
+
+Approach 3: Lazy Cleanup (On-Demand)
+Clean up orphaned preferences when user loads their preferences.
+Flow Diagram
+User requests preferences
+    ↓
+Fetch preferences from DB
+    ↓
+For each preference: Check if entity still exists
+    ↓
+If entity deleted: Remove preference
+    ↓
+Reorder and return cleaned list
