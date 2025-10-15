@@ -1,0 +1,504 @@
+New Endpoint
+GET /users/{userId}/preferences/all
+Response:
+json{
+  "toggleables": {
+    "darkMode": true,
+    "notifications": false,
+    "autoSave": true
+  },
+  "preferences": {
+    "language": "hu-HU",
+    "timezone": "Europe/Budapest",
+    "dateFormat": "yyyy-MM-dd"
+  },
+  "favorites": {
+    "ACCOUNT": ["acc-123", "acc-456"],
+    "PARTNER": ["partner-789"]
+  },
+  "sortables": {
+    "ACCOUNT": [
+      {"itemId": "acc-123", "order": 1, "value": "Primary Account"},
+      {"itemId": "acc-456", "order": 2, "value": "Secondary Account"}
+    ],
+    "PARTNER": [
+      {"itemId": "partner-789", "order": 1, "value": "Main Partner"}
+    ]
+  }
+}
+
+Design Decision: Separate Tables vs Single Table
+This new requirement tips the balance. Let me re-evaluate:
+Option A: Keep 4 Separate Tables (Original Design)
+Query Pattern:
+sql-- Need 4 separate queries
+SELECT * FROM user_toggleables WHERE user_id = ?;
+SELECT * FROM user_preferences WHERE user_id = ?;
+SELECT * FROM domain_favorites WHERE user_id = ? AND domain IN ('ACCOUNT', 'PARTNER', ...);
+SELECT * FROM domain_sortables WHERE user_id = ? AND domain IN ('ACCOUNT', 'PARTNER', ...);
+```
+
+**Pros:**
+- ✅ Individual endpoint queries remain optimal
+- ✅ Type-safe schemas
+- ✅ Clear separation of concerns
+
+**Cons:**
+- ❌ **4 round-trips to Cassandra** for bulk GET (network latency × 4)
+- ❌ Cannot use batching (different partition keys)
+- ❌ Complex application code to orchestrate 4 queries
+- ❌ Harder to make atomic/consistent
+- ❌ Cache invalidation becomes complex (4 cache keys)
+
+**Performance:**
+```
+Bulk GET with separate tables:
+- 4 × 10ms (Cassandra queries in sequence) = 40ms
+- Or 4 × 5ms (parallel queries) = ~15ms (best case)
+- Plus JSON aggregation overhead: ~5ms
+- Total: 20-45ms per bulk GET
+
+Option B: Single Unified Table ⭐ RECOMMENDED
+Given the new requirement, I now recommend reconsidering the single table design:
+sqlCREATE TABLE user_preferences_unified (
+    user_id uuid,
+    resource_type text,      -- 'toggleable', 'preference', 'favorite', 'sortable'
+    resource_key text,       -- toggleableId, preferenceId, domain+itemId
+    domain text,             -- NULL for global, 'ACCOUNT'/'PARTNER'/etc for domain-scoped
+    display_order int,       -- Only used for sortables, NULL otherwise
+    
+    -- Value storage (only one populated per row)
+    boolean_value boolean,   -- For toggleables
+    string_value text,       -- For preferences and sortable values
+    string_set set<text>,    -- For favorites (entire set in one row)
+    
+    created_at timestamp,
+    updated_at timestamp,
+    version int,
+    
+    PRIMARY KEY (user_id, resource_type, resource_key)
+) WITH CLUSTERING ORDER BY (resource_type ASC, resource_key ASC)
+  AND compaction = {'class': 'LeveledCompactionStrategy'};
+
+-- Optional index for sortables ordering
+CREATE MATERIALIZED VIEW user_sortables_ordered AS
+    SELECT * FROM user_preferences_unified
+    WHERE user_id IS NOT NULL 
+      AND resource_type IS NOT NULL 
+      AND domain IS NOT NULL
+      AND display_order IS NOT NULL
+      AND resource_key IS NOT NULL
+    PRIMARY KEY (user_id, resource_type, domain, display_order, resource_key)
+    WITH CLUSTERING ORDER BY (resource_type ASC, domain ASC, display_order ASC, resource_key ASC);
+```
+
+**Pros:**
+- ✅ **Single query for bulk GET** - entire user profile in one read
+- ✅ Single cache key: `prefs:all:{userId}`
+- ✅ Atomic consistency (all preferences in one partition)
+- ✅ Simpler application code
+- ✅ Easier to add new preference types in future
+
+**Cons:**
+- ⚠️ Less type-safe (nullable columns)
+- ⚠️ Wider rows (but still small: ~2-10 KB total per user)
+- ⚠️ Need to handle multiple value types
+
+**Performance:**
+```
+Bulk GET with unified table:
+- 1 × 10ms (single Cassandra query) = 10ms
+- Plus JSON transformation: ~3ms
+- Total: ~13ms per bulk GET
+- 2-3x faster than separate tables! ✅
+
+Revised Schema Recommendation: Hybrid Approach
+After analyzing the bulk GET requirement, here's my updated recommendation:
+Single Unified Table with Smart Clustering
+sqlCREATE TABLE user_preferences (
+    user_id uuid,
+    pref_category text,      -- 'toggleables', 'preferences', 'favorites-ACCOUNT', 'sortables-PARTNER'
+    pref_key text,           -- specific ID within category
+    display_order int,       -- for sortables only, NULL for others
+    
+    -- Polymorphic value storage
+    value_type text,         -- 'boolean', 'string', 'string_set'
+    bool_val boolean,
+    string_val text,
+    string_set_val set<text>,
+    
+    created_at timestamp,
+    updated_at timestamp,
+    version int,
+    
+    PRIMARY KEY (user_id, pref_category, display_order, pref_key)
+) WITH CLUSTERING ORDER BY (pref_category ASC, display_order ASC, pref_key ASC);
+```
+
+### Data Layout Examples
+
+**Toggleables:**
+```
+| user_id | pref_category | pref_key  | display_order | value_type | bool_val |
+|---------|---------------|-----------|---------------|------------|----------|
+| uuid-1  | toggleables   | darkMode  | NULL          | boolean    | true     |
+| uuid-1  | toggleables   | autoSave  | NULL          | boolean    | false    |
+```
+
+**Preferences:**
+```
+| user_id | pref_category | pref_key   | display_order | value_type | string_val |
+|---------|---------------|------------|---------------|------------|------------|
+| uuid-1  | preferences   | language   | NULL          | string     | hu-HU      |
+| uuid-1  | preferences   | timezone   | NULL          | string     | Europe/... |
+```
+
+**Favorites (using set):**
+```
+| user_id | pref_category      | pref_key | display_order | value_type | string_set_val        |
+|---------|-------------------|----------|---------------|------------|-----------------------|
+| uuid-1  | favorites-ACCOUNT | _set     | NULL          | string_set | {acc-123, acc-456}    |
+| uuid-1  | favorites-PARTNER | _set     | NULL          | string_set | {partner-789}         |
+```
+
+**Sortables:**
+```
+| user_id | pref_category      | pref_key | display_order | value_type | string_val        |
+|---------|-------------------|----------|---------------|------------|-------------------|
+| uuid-1  | sortables-ACCOUNT | acc-123  | 1000          | string     | Primary Account   |
+| uuid-1  | sortables-ACCOUNT | acc-456  | 2000          | string     | Secondary Account |
+| uuid-1  | sortables-PARTNER | ptr-789  | 1000          | string     | Main Partner      |
+
+Query Patterns with Unified Table
+Bulk GET (NEW - most important!)
+sqlSELECT pref_category, pref_key, display_order, value_type,
+       bool_val, string_val, string_set_val, version, updated_at
+FROM user_preferences
+WHERE user_id = ?;
+Single partition read - fetches everything! 🚀
+Application code:
+javaMap<String, Object> result = new HashMap<>();
+result.put("toggleables", new HashMap<>());
+result.put("preferences", new HashMap<>());
+result.put("favorites", new HashMap<>());
+result.put("sortables", new HashMap<>());
+
+for (Row row : rows) {
+    String category = row.getString("pref_category");
+    
+    if (category.equals("toggleables")) {
+        result.get("toggleables").put(
+            row.getString("pref_key"), 
+            row.getBool("bool_val")
+        );
+    } else if (category.equals("preferences")) {
+        result.get("preferences").put(
+            row.getString("pref_key"),
+            row.getString("string_val")
+        );
+    } else if (category.startsWith("favorites-")) {
+        String domain = category.substring("favorites-".length());
+        result.get("favorites").put(
+            domain,
+            row.getSet("string_set_val", String.class)
+        );
+    } else if (category.startsWith("sortables-")) {
+        String domain = category.substring("sortables-".length());
+        List<SortableItem> items = result.get("sortables")
+            .computeIfAbsent(domain, k -> new ArrayList<>());
+        items.add(new SortableItem(
+            row.getString("pref_key"),
+            row.getInt("display_order"),
+            row.getString("string_val")
+        ));
+    }
+}
+Individual GETs (still efficient!)
+GET /toggleables:
+sqlSELECT pref_key, bool_val, version, updated_at
+FROM user_preferences
+WHERE user_id = ? AND pref_category = 'toggleables';
+GET /preferences:
+sqlSELECT pref_key, string_val, version, updated_at
+FROM user_preferences
+WHERE user_id = ? AND pref_category = 'preferences';
+GET /domains/{domainId}/favorites:
+sqlSELECT string_set_val
+FROM user_preferences
+WHERE user_id = ? AND pref_category = ?;  -- 'favorites-ACCOUNT'
+GET /domains/{domainId}/sortables:
+sqlSELECT pref_key, display_order, string_val, version, updated_at
+FROM user_preferences
+WHERE user_id = ? AND pref_category = ?;  -- 'sortables-ACCOUNT'
+```
+
+**All individual queries are still single-partition reads!** ✅
+
+---
+
+## Redis Caching Strategy (Updated)
+
+### Cache Keys
+```
+Bulk cache:       prefs:all:{userId}  → entire response JSON (10-50 KB)
+Individual cache: prefs:{category}:{userId}:{domain?}  → category-specific JSON
+
+TTL: 10 minutes for bulk, 15 minutes for individual
+```
+
+### Cache Strategy
+
+**Option 1: Cache Only Bulk Response** ⭐ **Recommended**
+```
+GET /users/{userId}/preferences/all
+  → Check: prefs:all:{userId}
+  → Miss: Query Cassandra (1 query), cache result
+  → Hit: Return cached JSON
+
+GET /toggleables
+  → Check: prefs:all:{userId}  (reuse bulk cache!)
+  → Extract toggleables section
+  → If miss: Query Cassandra for just toggleables
+
+PUT /toggleables/{id}
+  → Update Cassandra
+  → Invalidate: prefs:all:{userId}
+```
+
+**Pros:**
+- Single cache key to manage
+- Bulk GET is 100% cached
+- Individual GETs can reuse bulk cache
+- Simple invalidation
+
+**Cons:**
+- Individual GETs cache miss requires full partition read (but it's still just one query)
+
+**Option 2: Cache Both Bulk and Individual**
+```
+Cache hierarchy:
+- prefs:all:{userId}           → bulk response
+- prefs:toggleables:{userId}   → just toggleables
+- prefs:favorites:{userId}:ACCOUNT → just ACCOUNT favorites
+```
+
+**Pros:**
+- Optimal cache hit for every endpoint
+- Minimal data transfer
+
+**Cons:**
+- Complex cache invalidation (must invalidate bulk + specific on every write)
+- More cache memory usage
+- Risk of cache inconsistency
+
+**Recommendation: Start with Option 1** (bulk only), add individual caching if needed.
+
+---
+
+## Performance Impact Analysis
+
+### Latency Comparison
+
+| Endpoint | 4 Separate Tables | Unified Table | Improvement |
+|----------|-------------------|---------------|-------------|
+| GET /preferences/all | 20-45ms (4 queries) | 10-13ms (1 query) | **2-3x faster** ✅ |
+| GET /toggleables | 10-15ms | 10-15ms | Same |
+| GET /sortables/{domain} | 10-15ms | 10-15ms | Same |
+| PUT /toggleables/{id} | 5-10ms | 5-10ms | Same |
+
+**Key insight: Unified table makes bulk GET much faster with no penalty for individual operations.**
+
+### Cache Hit Rate Impact
+
+**Scenario: User opens dashboard (bulk GET)**
+
+With **separate tables + individual caching:**
+```
+Cache miss scenario:
+- 4 cache lookups (4 × 1ms) = 4ms
+- 4 Cassandra queries (4 × 10ms) = 40ms
+- Total: 44ms
+```
+
+With **unified table + bulk caching:**
+```
+Cache miss scenario:
+- 1 cache lookup (1ms)
+- 1 Cassandra query (10ms)
+- Total: 11ms
+
+Cache hit scenario:
+- 1 cache lookup (1ms)
+- Total: 1ms
+```
+
+**4x faster on cache miss, same on cache hit!** 🚀
+
+---
+
+## Partition Size Analysis (Updated)
+
+### Unified Table Partition Size
+
+**Per user partition: (user_id)**
+```
+Toggleables:   15 rows × 150 bytes  = 2.25 KB
+Preferences:   20 rows × 200 bytes  = 4 KB
+Favorites:     3 rows × 500 bytes   = 1.5 KB   (set storage)
+Sortables:     45 rows × 300 bytes  = 13.5 KB  (3 domains × 15 items)
+-----------------------------------------------------------
+Total per user:                      ~21 KB
+Assessment: Still excellent! Well under 100 MB partition limit.
+Scalability:
+
+2M users × 21 KB = 42 GB raw data
+With RF=3 + overhead = ~130 GB cluster storage
+6-node cluster handles this easily ✅
+
+
+Updated Schema: Final Recommendation
+sqlCREATE TABLE user_preferences (
+    user_id uuid,
+    pref_category text,      -- 'toggleables', 'preferences', 'favorites-{DOMAIN}', 'sortables-{DOMAIN}'
+    pref_key text,           -- Identifier within category
+    display_order int,       -- Used only for sortables, NULL otherwise
+    
+    -- Polymorphic value columns (only one populated per row)
+    value_type text,         -- 'boolean' | 'string' | 'string_set'
+    bool_val boolean,
+    string_val text,
+    string_set_val set<text>,
+    
+    -- Metadata
+    created_at timestamp,
+    updated_at timestamp,
+    version int,             -- Optimistic locking
+    
+    PRIMARY KEY (user_id, pref_category, display_order, pref_key)
+) WITH CLUSTERING ORDER BY (pref_category ASC, display_order ASC, pref_key ASC)
+  AND compaction = {'class': 'LeveledCompactionStrategy'}
+  AND comment = 'Unified user preferences table supporting bulk and individual access';
+
+-- Optional: Index for fast lookups by key across categories (probably not needed)
+-- CREATE INDEX ON user_preferences (pref_key);
+Migration Path from 4 Tables
+If you already started with 4 separate tables:
+sql-- 1. Create unified table
+CREATE TABLE user_preferences (...);
+
+-- 2. Migrate data
+INSERT INTO user_preferences (user_id, pref_category, pref_key, ...)
+SELECT user_id, 'toggleables', toggleable_id, NULL, 'boolean', enabled, NULL, NULL, ...
+FROM user_toggleables;
+
+INSERT INTO user_preferences (user_id, pref_category, pref_key, ...)
+SELECT user_id, 'preferences', preference_id, NULL, 'string', NULL, value, NULL, ...
+FROM user_preferences_old;
+
+-- Similar for favorites and sortables...
+
+-- 3. Dual-write period (application writes to both)
+-- 4. Switch reads to new table
+-- 5. Drop old tables
+```
+
+---
+
+## Updated Confluence Section
+
+Add this new section to your Confluence doc:
+
+---
+
+## Bulk GET Endpoint Design
+
+### New Requirement: GET All Preferences
+```
+GET /users/{userId}/preferences/all
+
+Response: {
+  "toggleables": {...},
+  "preferences": {...},
+  "favorites": {...},
+  "sortables": {...}
+}
+```
+
+### Design Decision: Unified Table
+
+**Rationale:** Bulk GET endpoint changes the optimal design from 4 separate tables to a single unified table.
+
+**Performance Impact:**
+
+| Metric | 4 Tables | Unified Table | Winner |
+|--------|----------|---------------|--------|
+| Bulk GET latency | 20-45ms (4 queries) | 10-13ms (1 query) | **Unified** ✅ |
+| Individual GET latency | 10-15ms | 10-15ms | Tie |
+| Cache strategy complexity | High (4 keys) | Low (1 key) | **Unified** ✅ |
+| Schema complexity | Low (type-safe) | Medium (polymorphic) | 4 Tables |
+| Partition size | ~21 KB (spread) | ~21 KB (single) | Tie |
+
+**Conclusion:** Unified table provides 2-3x faster bulk reads with no penalty for individual operations.
+
+### Caching Strategy for Bulk GET
+
+**Cache Key:** `prefs:all:{userId}`  
+**TTL:** 10 minutes  
+**Size:** 10-50 KB per user (JSON)
+
+**Flow:**
+```
+1. Check Redis: prefs:all:{userId}
+2. If hit (95% expected): Return cached JSON (1-2ms)
+3. If miss: 
+   - Query Cassandra (single partition read: 10ms)
+   - Transform to JSON (3ms)
+   - Cache result
+   - Return (total: 13ms)
+Individual endpoints can reuse bulk cache:
+
+GET /toggleables → Extract from cached bulk response if available
+Fallback to category-specific query if bulk cache missing
+
+Cache Invalidation:
+
+Any PUT/PATCH/POST/DELETE invalidates prefs:all:{userId}
+Simple, reliable, no cache consistency issues
+
+Expected Cache Hit Rates
+User behavior analysis:
+ScenarioFrequencyCache ImpactDashboard load (bulk GET)70% of trafficDirect bulk cache hitIndividual toggle20% of trafficCan reuse bulk cacheSettings page10% of trafficCategory-specific query
+Overall expected cache hit rate: 85-95%
+With this hit rate:
+
+Cassandra sees only 5-15% of total traffic
+Average response time: ~2-3ms (mostly Redis)
+P99 response time: ~15-20ms (occasional Cassandra hit)
+
+
+Final Verdict
+The bulk GET endpoint completely changes the design calculus:
+Before Bulk GET: 4 Separate Tables
+
+Optimal for individual resource access
+Type-safe schemas
+Clear separation
+
+After Bulk GET: Unified Table ⭐
+
+2-3x faster for bulk operations
+Same performance for individual operations
+Simpler caching (1 key vs 4)
+Easier to maintain consistency
+Easier to add new preference types
+
+Recommendation: Use the unified table design. The performance gains for bulk GET (which will likely be your highest-traffic endpoint) far outweigh the minor loss of type safety.
+Implementation Priority
+
+Week 1-2: Implement unified table schema
+Week 3: Implement bulk GET endpoint with Redis caching
+Week 4: Implement individual GET/PUT/PATCH endpoints
+Week 5: Load testing and cache tuning
+Week 6: Production deployment
+
+The bulk GET endpoint is a game-changer - it justifies moving to a unified table design. Good catch on identifying this requirement early! 🎯RetryClaude can make mistakes. Please double-check responses. Sonnet 4.5
