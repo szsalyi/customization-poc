@@ -2190,12 +2190,8 @@ CREATE SEQUENCE seq_preference_user_id
     NOCACHE
     NOCYCLE;
 
--- Sequence for user_preferences PK
-CREATE SEQUENCE seq_preference_id
-    START WITH 1
-    INCREMENT BY 1
-    NOCACHE
-    NOCYCLE;
+-- Note: user_preferences uses UUID for PK (see reasoning below)
+-- No sequence needed for UUID generation
 
 -- Sequence for user_sortables PK
 CREATE SEQUENCE seq_sort_id
@@ -2240,8 +2236,9 @@ CREATE INDEX idx_user_lookup ON user_identities(primary_user_id, secondary_user_
 CREATE INDEX idx_user_active ON user_identities(is_active, preference_user_id);
 
 -- 2. User Preferences Table
+-- Uses UUID for PK to support external API references (e.g., /api/preferences/{preferenceId})
 CREATE TABLE user_preferences (
-    preference_id NUMBER DEFAULT seq_preference_id.NEXTVAL PRIMARY KEY,
+    preference_id VARCHAR2(36) PRIMARY KEY,                                              -- UUID from API layer
     preference_user_id NUMBER NOT NULL,
     preference_key VARCHAR2(255) NOT NULL,
     preference_value VARCHAR2(1000) NOT NULL,
@@ -2251,10 +2248,15 @@ CREATE TABLE user_preferences (
 
     CONSTRAINT fk_pref_user FOREIGN KEY (preference_user_id)
         REFERENCES user_identities(preference_user_id) ON DELETE CASCADE,
-    CONSTRAINT uk_pref UNIQUE (preference_user_id, preference_key, compat_version)
+    CONSTRAINT uk_pref UNIQUE (preference_user_id, preference_key, compat_version),
+    CONSTRAINT chk_pref_uuid CHECK (
+        REGEXP_LIKE(preference_id, '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', 'i')
+    )
 );
 
+-- Indexes for dashboard loads and API lookups
 CREATE INDEX idx_pref_user_compat ON user_preferences(preference_user_id, compat_version);
+CREATE INDEX idx_pref_id ON user_preferences(preference_id);  -- For direct API lookups by UUID
 
 -- 3. User Sortables Table (for drag-and-drop reordering)
 CREATE TABLE user_sortables (
@@ -2296,9 +2298,19 @@ CREATE INDEX idx_fav_user_type ON user_favorites(preference_user_id, domain_type
 | Sequence | Purpose | Start | Increment | Cache | Cycle | Notes |
 |----------|---------|-------|-----------|-------|-------|-------|
 | seq_preference_user_id | PK for user_identities | 1 | 1 | NO | NO | Surrogate key for all user-related queries (internal) |
-| seq_preference_id | PK for user_preferences | 1 | 1 | NO | NO | Individual preference entries (per setting) |
+| ~~seq_preference_id~~ | ~~PK for user_preferences~~ | ~~1~~ | ~~1~~ | ~~NO~~ | ~~NO~~ | ~~Individual preference entries~~ **REMOVED - Now uses UUID** |
 | seq_sort_id | PK for user_sortables | 1 | 1 | NO | NO | Sortable entries (one per account/partner) |
 | seq_favorite_id | PK for user_favorites | 1 | 1 | NO | NO | Favorite entries (starred accounts/partners) |
+
+**Note on user_preferences.preference_id**:
+- **Type**: VARCHAR2(36) - UUID format
+- **Generation**: Generated in API layer (Spring Boot using UUID.randomUUID())
+- **Validation**: Database CHECK constraint ensures valid UUID format
+- **Reasoning**:
+  - API-friendly (direct reference in REST endpoints: `/api/preferences/{preferenceId}`)
+  - External system integration (other services can reference preferences by UUID)
+  - Debugging (UUID in logs is immediately recognizable, not just a number)
+  - Mutability (numeric IDs can be guessed; UUIDs are harder to enumerate)
 
 **Cache = NO**: Safer for single-row operations, though slightly slower. Use YES (default 20) if you need higher throughput (millions of inserts/day).
 
@@ -2310,6 +2322,7 @@ CREATE INDEX idx_fav_user_type ON user_favorites(preference_user_id, domain_type
 
 ```sql
 -- Check sequence current values
+-- Note: SEQ_PREFERENCE_ID removed (user_preferences now uses UUID)
 SELECT
     sequence_name,
     last_number,
@@ -2317,7 +2330,7 @@ SELECT
     cache_size,
     cycle_flag
 FROM user_sequences
-WHERE sequence_name IN ('SEQ_PREFERENCE_USER_ID', 'SEQ_PREFERENCE_ID', 'SEQ_SORT_ID', 'SEQ_FAVORITE_ID')
+WHERE sequence_name IN ('SEQ_PREFERENCE_USER_ID', 'SEQ_SORT_ID', 'SEQ_FAVORITE_ID')
 ORDER BY sequence_name;
 
 -- Monitor sequence gaps (if manually reset or corrected)
@@ -2336,10 +2349,7 @@ SELECT
     seq_preference_user_id.NEXTVAL AS next_value
 FROM dual;
 
-SELECT
-    'seq_preference_id' AS sequence_name,
-    seq_preference_id.NEXTVAL AS next_value
-FROM dual;
+-- seq_preference_id removed (user_preferences uses UUID generation in API layer)
 
 SELECT
     'seq_sort_id' AS sequence_name,
@@ -2380,7 +2390,7 @@ INSERT INTO user_identities (
 
 **Query 1.2: Create New Preference Entry**
 ```sql
--- Insert new preference setting using explicit sequence
+-- Insert new preference setting using UUID (generated in API layer)
 INSERT INTO user_preferences (
     preference_id,
     preference_user_id,
@@ -2388,12 +2398,18 @@ INSERT INTO user_preferences (
     preference_value,
     compat_version
 ) VALUES (
-    seq_preference_id.NEXTVAL,                -- Explicit sequence reference
+    :preference_uuid,                         -- UUID from API layer (UUID.randomUUID())
     :user_id,                                 -- From user_identities.preference_user_id
     'backgroundColor',
     'dark-blue',
     'v1'
 );
+```
+
+**Generated in API Layer (Spring Boot)**:
+```java
+String preferenceId = UUID.randomUUID().toString();  // e.g., "550e8400-e29b-41d4-a716-446655440099"
+// Then pass :preference_uuid to INSERT query
 ```
 
 **Query 1.3: Create New Sortable Entry**
@@ -2459,7 +2475,7 @@ public interface UserIdentityRepository extends JpaRepository<UserIdentity, Long
 }
 ```
 
-#### Approach 2: Use JPA @SequenceGenerator (Recommended for Spring)
+#### Approach 2: Use JPA @SequenceGenerator for Numbers, @GeneratedValue(GenerationType.UUID) for UUIDs
 
 ```java
 @Entity
@@ -2490,17 +2506,67 @@ public class UserIdentity {
 public class UserPreference {
 
     @Id
-    @SequenceGenerator(
-        name = "preference_id_seq",
-        sequenceName = "seq_preference_id",
-        allocationSize = 1
-    )
-    @GeneratedValue(strategy = GenerationType.SEQUENCE, generator = "preference_id_seq")
-    @Column(name = "preference_id")
-    private Long preferenceId;
+    @GeneratedValue(strategy = GenerationType.UUID)  // Auto-generates UUID v4
+    @Column(name = "preference_id", columnDefinition = "VARCHAR(36)")
+    private String preferenceId;
+
+    @Column(name = "preference_user_id", nullable = false)
+    private Long preferenceUserId;
+
+    @Column(name = "preference_key", nullable = false, length = 255)
+    private String preferenceKey;
+
+    @Column(name = "preference_value", length = 1000)
+    private String preferenceValue;
+
+    @Column(name = "compat_version")
+    private String compatVersion = "v1";
+
+    @Column(name = "created_at", nullable = false, updatable = false)
+    private LocalDateTime createdAt = LocalDateTime.now();
+
+    @Column(name = "updated_at", nullable = false)
+    private LocalDateTime updatedAt = LocalDateTime.now();
 
     // ... rest of entity
 }
+
+// Usage in REST Controller:
+@PostMapping("/preferences")
+public ResponseEntity<UserPreference> createPreference(@RequestBody CreatePreferenceRequest req) {
+    UserPreference pref = new UserPreference();
+    // preferenceId is auto-generated by JPA (@GeneratedValue UUID)
+    pref.setPreferenceUserId(req.getUserId());
+    pref.setPreferenceKey(req.getKey());
+    pref.setPreferenceValue(req.getValue());
+
+    UserPreference saved = preferenceRepository.save(pref);
+    return ResponseEntity.created(URI.create("/api/preferences/" + saved.getPreferenceId()))
+        .body(saved);
+}
+
+// Direct lookup by UUID:
+@GetMapping("/preferences/{preferenceId}")
+public ResponseEntity<UserPreference> getPreference(@PathVariable String preferenceId) {
+    return preferenceRepository.findById(preferenceId)
+        .map(ResponseEntity::ok)
+        .orElse(ResponseEntity.notFound().build());
+}
+
+// Update preference by UUID:
+@PutMapping("/preferences/{preferenceId}")
+public ResponseEntity<UserPreference> updatePreference(
+        @PathVariable String preferenceId,
+        @RequestBody UpdatePreferenceRequest req) {
+    return preferenceRepository.findById(preferenceId)
+        .map(pref -> {
+            pref.setPreferenceValue(req.getValue());
+            pref.setUpdatedAt(LocalDateTime.now());
+            return ResponseEntity.ok(preferenceRepository.save(pref));
+        })
+        .orElse(ResponseEntity.notFound().build());
+}
+```
 
 @Entity
 @Table(name = "user_sortables")
@@ -2538,30 +2604,74 @@ public class UserFavorite {
 ```
 
 **Advantages of Approach 2**:
-- ✅ JPA handles sequence generation automatically
-- ✅ Spring Boot recognizes named sequences
-- ✅ No manual NEXTVAL calls in code
+- ✅ JPA handles sequence generation automatically (sequences)
+- ✅ JPA handles UUID generation automatically (@GeneratedValue UUID)
+- ✅ Spring Boot recognizes named sequences and UUID generation
+- ✅ No manual NEXTVAL or UUID.randomUUID() calls in code
 - ✅ allocationSize = 1 = no pre-allocation (optimal for small batches)
+- ✅ UUID for preferences = API-friendly, directly referenceable in REST endpoints
+- ✅ Supports REST patterns: `/api/preferences/{preferenceId}` with UUID instead of numeric ID
 
 ---
 
-### Deployment Checklist for Named Sequences
+### Deployment Checklist for Sequences & UUID
 
-- [ ] Create all 4 sequences before creating tables
+**Sequence Creation**:
+- [ ] Create 3 sequences before creating tables (seq_preference_user_id, seq_sort_id, seq_favorite_id)
+- [ ] ~~seq_preference_id~~ removed (user_preferences uses UUID)
 - [ ] Verify sequence names match DDL exactly (case-sensitive)
 - [ ] Test INSERT operations to confirm sequence generation works
 - [ ] Monitor sequence NEXTVAL with monitoring query above
 - [ ] Document sequence values in deployment notes
+
+**UUID Generation for Preferences**:
+- [ ] Verify Spring Boot @GeneratedValue(strategy = GenerationType.UUID) is set on UserPreference.preferenceId
+- [ ] Test that UUIDs are auto-generated without manual intervention
+- [ ] Verify database CHECK constraint validates UUID format on insert
+- [ ] Test API endpoints with UUID in path: `/api/preferences/{preferenceId}`
+- [ ] Verify UUID indexes work efficiently: idx_pref_id on preference_id
+
+**Production Readiness**:
 - [ ] Set up alerts if sequence allocation gap > 10% (potential issue indicator)
 - [ ] Test rollback behavior (sequences not rolled back on transaction failure - by design)
-- [ ] Verify Spring Boot entity @SequenceGenerator matches sequence names
+- [ ] Verify Spring Boot entity @SequenceGenerator matches sequence names for numeric IDs
+- [ ] Verify Spring Boot @GeneratedValue(UUID) generates valid UUIDs
+- [ ] Load test with high concurrent preference creation to verify UUID uniqueness
+- [ ] Monitor UUID storage overhead (36 bytes) vs numeric (8 bytes) - acceptable for API benefits
 
 ---
 
-**Document Version**: 2.3 (Added Explicit Sequence Definitions)
+**Document Version**: 2.4 (UUID for Preference IDs - API Friendly)
 **Created**: 2025-10-30
 **Last Updated**: 2025-11-03
 **Query Type**: Partner sortables, favorites, and batch operations
 **Complexity**: Low (identical to account patterns)
 **Expected Performance**: <1ms single ops, 2-8ms batch/load (SLA: <20ms)
 **Status**: Production-Ready
+
+---
+
+### Change Log - Version 2.4
+
+**Major Change**: User_preferences.preference_id now uses UUID instead of sequence-generated NUMBER
+
+**Why**:
+- ✅ Preferences can be updated via API calls (all preference types)
+- ✅ UUID enables direct REST endpoint references: `/api/preferences/{preferenceId}`
+- ✅ External systems can integrate using preference UUID
+- ✅ Debugging is easier (UUID in logs vs numeric ID)
+- ✅ Better security (UUID harder to enumerate than sequential numbers)
+
+**What Changed**:
+| Component | Before | After |
+|-----------|--------|-------|
+| preference_id Type | NUMBER | VARCHAR2(36) UUID |
+| Generation | seq_preference_id sequence | @GeneratedValue(UUID) in JPA |
+| Constraint | None | CHECK (valid UUID format) |
+| Lookup Index | Covered by uk_pref | New idx_pref_id on preference_id |
+| API Endpoint | N/A (numeric internal ID) | `/api/preferences/{preferenceId}` with UUID |
+| Spring Entity | @SequenceGenerator | @GeneratedValue(UUID) |
+
+**Sequences Affected**:
+- **Removed**: seq_preference_id (no longer needed)
+- **Kept**: seq_preference_user_id, seq_sort_id, seq_favorite_id
