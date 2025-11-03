@@ -2176,7 +2176,389 @@ CREATE INDEX idx_fav_user_type ON user_favorites (preference_user_id, domain_typ
 
 ---
 
-**Document Version**: 2.2 (Added Partner Sortables & Favorites)
+## Explicit Sequence Definitions
+
+When using `GENERATED ALWAYS AS IDENTITY`, Oracle automatically creates sequences with auto-generated names like `ISEQ$$_11234`. To have explicit control over sequence names for monitoring and troubleshooting, define them explicitly.
+
+### Create Named Sequences
+
+```sql
+-- Sequence for user_identities PK
+CREATE SEQUENCE seq_preference_user_id
+    START WITH 1
+    INCREMENT BY 1
+    NOCACHE
+    NOCYCLE;
+
+-- Sequence for user_preferences PK
+CREATE SEQUENCE seq_preference_id
+    START WITH 1
+    INCREMENT BY 1
+    NOCACHE
+    NOCYCLE;
+
+-- Sequence for user_sortables PK
+CREATE SEQUENCE seq_sort_id
+    START WITH 1
+    INCREMENT BY 1
+    NOCACHE
+    NOCYCLE;
+
+-- Sequence for user_favorites PK
+CREATE SEQUENCE seq_favorite_id
+    START WITH 1
+    INCREMENT BY 1
+    NOCACHE
+    NOCYCLE;
+```
+
+### Updated DDL with Explicit Sequences
+
+```sql
+-- 1. User Identities Table
+CREATE TABLE user_identities (
+    preference_user_id NUMBER DEFAULT seq_preference_user_id.NEXTVAL PRIMARY KEY,
+    primary_user_id VARCHAR2(36) NOT NULL,
+    secondary_user_id VARCHAR2(36),
+    identity_type VARCHAR2(10) CHECK (identity_type IN ('RETAIL', 'CORP')) NOT NULL,
+    is_active NUMBER(1) DEFAULT 1 NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+
+    CONSTRAINT uk_primary_secondary UNIQUE (primary_user_id, secondary_user_id),
+    CONSTRAINT chk_active CHECK (is_active IN (0, 1)),
+    CONSTRAINT chk_primary_uuid CHECK (
+        REGEXP_LIKE(primary_user_id, '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', 'i')
+    ),
+    CONSTRAINT chk_secondary_uuid CHECK (
+        secondary_user_id IS NULL OR
+        REGEXP_LIKE(secondary_user_id, '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', 'i')
+    )
+);
+
+CREATE INDEX idx_user_lookup ON user_identities(primary_user_id, secondary_user_id);
+CREATE INDEX idx_user_active ON user_identities(is_active, preference_user_id);
+
+-- 2. User Preferences Table
+CREATE TABLE user_preferences (
+    preference_id NUMBER DEFAULT seq_preference_id.NEXTVAL PRIMARY KEY,
+    preference_user_id NUMBER NOT NULL,
+    preference_key VARCHAR2(255) NOT NULL,
+    preference_value VARCHAR2(1000) NOT NULL,
+    compat_version VARCHAR2(20) DEFAULT 'v1' NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+
+    CONSTRAINT fk_pref_user FOREIGN KEY (preference_user_id)
+        REFERENCES user_identities(preference_user_id) ON DELETE CASCADE,
+    CONSTRAINT uk_pref UNIQUE (preference_user_id, preference_key, compat_version)
+);
+
+CREATE INDEX idx_pref_user_compat ON user_preferences(preference_user_id, compat_version);
+
+-- 3. User Sortables Table (for drag-and-drop reordering)
+CREATE TABLE user_sortables (
+    sort_id NUMBER DEFAULT seq_sort_id.NEXTVAL PRIMARY KEY,
+    preference_user_id NUMBER NOT NULL,
+    domain_type VARCHAR2(20) NOT NULL,          -- 'ACCOUNT' or 'PARTNER'
+    domain_id VARCHAR2(255) NOT NULL,           -- Account/Partner UUID
+    sort_position NUMBER NOT NULL,              -- Gap-based: 10, 20, 30, ...
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+
+    CONSTRAINT fk_sort_user FOREIGN KEY (preference_user_id)
+        REFERENCES user_identities(preference_user_id) ON DELETE CASCADE,
+    CONSTRAINT uk_sort_entity UNIQUE (preference_user_id, domain_type, domain_id),
+    CONSTRAINT chk_position CHECK (sort_position > 0)
+);
+
+CREATE INDEX idx_sort_user_type ON user_sortables(preference_user_id, domain_type, sort_position);
+
+-- 4. User Favorites Table
+CREATE TABLE user_favorites (
+    favorite_id NUMBER DEFAULT seq_favorite_id.NEXTVAL PRIMARY KEY,
+    preference_user_id NUMBER NOT NULL,
+    domain_type VARCHAR2(20) NOT NULL,          -- 'ACCOUNT' or 'PARTNER'
+    domain_id VARCHAR2(255) NOT NULL,           -- Account/Partner UUID
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+
+    CONSTRAINT fk_fav_user FOREIGN KEY (preference_user_id)
+        REFERENCES user_identities(preference_user_id) ON DELETE CASCADE,
+    CONSTRAINT uk_favorite UNIQUE (preference_user_id, domain_type, domain_id)
+);
+
+CREATE INDEX idx_fav_user_type ON user_favorites(preference_user_id, domain_type, created_at DESC);
+```
+
+### Sequence Configuration Notes
+
+| Sequence | Purpose | Start | Increment | Cache | Cycle | Notes |
+|----------|---------|-------|-----------|-------|-------|-------|
+| seq_preference_user_id | PK for user_identities | 1 | 1 | NO | NO | Surrogate key for all user-related queries (internal) |
+| seq_preference_id | PK for user_preferences | 1 | 1 | NO | NO | Individual preference entries (per setting) |
+| seq_sort_id | PK for user_sortables | 1 | 1 | NO | NO | Sortable entries (one per account/partner) |
+| seq_favorite_id | PK for user_favorites | 1 | 1 | NO | NO | Favorite entries (starred accounts/partners) |
+
+**Cache = NO**: Safer for single-row operations, though slightly slower. Use YES (default 20) if you need higher throughput (millions of inserts/day).
+
+**Cycle = NO**: Prevents sequence wraparound. Keep NO unless you're certain about lifecycle.
+
+---
+
+### Monitoring Sequences
+
+```sql
+-- Check sequence current values
+SELECT
+    sequence_name,
+    last_number,
+    increment_by,
+    cache_size,
+    cycle_flag
+FROM user_sequences
+WHERE sequence_name IN ('SEQ_PREFERENCE_USER_ID', 'SEQ_PREFERENCE_ID', 'SEQ_SORT_ID', 'SEQ_FAVORITE_ID')
+ORDER BY sequence_name;
+
+-- Monitor sequence gaps (if manually reset or corrected)
+SELECT
+    sequence_name,
+    last_number,
+    (SELECT COUNT(*) FROM user_identities) AS current_id_count,
+    CASE WHEN last_number > (SELECT COUNT(*) FROM user_identities) THEN 'GAP EXISTS'
+         ELSE 'OK' END AS status
+FROM user_sequences
+WHERE sequence_name = 'SEQ_PREFERENCE_USER_ID';
+
+-- Find next values (what will be assigned)
+SELECT
+    'seq_preference_user_id' AS sequence_name,
+    seq_preference_user_id.NEXTVAL AS next_value
+FROM dual;
+
+SELECT
+    'seq_preference_id' AS sequence_name,
+    seq_preference_id.NEXTVAL AS next_value
+FROM dual;
+
+SELECT
+    'seq_sort_id' AS sequence_name,
+    seq_sort_id.NEXTVAL AS next_value
+FROM dual;
+
+SELECT
+    'seq_favorite_id' AS sequence_name,
+    seq_favorite_id.NEXTVAL AS next_value
+FROM dual;
+```
+
+---
+
+### Insert Examples Using Named Sequences
+
+**Query 1.1: Create New User Identity**
+```sql
+-- Inserts new user with explicit sequence reference
+INSERT INTO user_identities (
+    preference_user_id,
+    primary_user_id,
+    secondary_user_id,
+    identity_type,
+    is_active,
+    created_at,
+    updated_at
+) VALUES (
+    seq_preference_user_id.NEXTVAL,           -- Explicit sequence reference
+    '550e8400-e29b-41d4-a716-446655440000',  -- UUID from auth service
+    NULL,                                      -- Retail user (no secondary)
+    'RETAIL',
+    1,
+    CURRENT_TIMESTAMP,
+    CURRENT_TIMESTAMP
+);
+```
+
+**Query 1.2: Create New Preference Entry**
+```sql
+-- Insert new preference setting using explicit sequence
+INSERT INTO user_preferences (
+    preference_id,
+    preference_user_id,
+    preference_key,
+    preference_value,
+    compat_version
+) VALUES (
+    seq_preference_id.NEXTVAL,                -- Explicit sequence reference
+    :user_id,                                 -- From user_identities.preference_user_id
+    'backgroundColor',
+    'dark-blue',
+    'v1'
+);
+```
+
+**Query 1.3: Create New Sortable Entry**
+```sql
+-- Insert new sortable with explicit sequence and gap-based position
+INSERT INTO user_sortables (
+    sort_id,
+    preference_user_id,
+    domain_type,
+    domain_id,
+    sort_position
+) VALUES (
+    seq_sort_id.NEXTVAL,                      -- Explicit sequence reference
+    :user_id,
+    'ACCOUNT',
+    '650e8400-e29b-41d4-a716-446655440001',
+    (SELECT COALESCE(MAX(sort_position), 0) + 10
+     FROM user_sortables
+     WHERE preference_user_id = :user_id AND domain_type = 'ACCOUNT')
+);
+```
+
+**Query 1.4: Create New Favorite Entry**
+```sql
+-- Insert new favorite with explicit sequence
+INSERT INTO user_favorites (
+    favorite_id,
+    preference_user_id,
+    domain_type,
+    domain_id
+) VALUES (
+    seq_favorite_id.NEXTVAL,                  -- Explicit sequence reference
+    :user_id,
+    'PARTNER',
+    '750e8400-e29b-41d4-a716-446655440002'
+);
+```
+
+---
+
+### Spring Boot Integration with Named Sequences
+
+When using explicit sequences in Spring Boot, you have two approaches:
+
+#### Approach 1: Reference Sequence in Repository Query
+
+```java
+@Repository
+public interface UserIdentityRepository extends JpaRepository<UserIdentity, Long> {
+
+    // Using RETURNING clause to get generated ID
+    @Modifying
+    @Query(value =
+        "INSERT INTO user_identities " +
+        "(preference_user_id, primary_user_id, secondary_user_id, identity_type) " +
+        "VALUES (seq_preference_user_id.NEXTVAL, :primary, :secondary, :type)",
+        nativeQuery = true)
+    void createIdentity(
+        @Param("primary") String primaryUserId,
+        @Param("secondary") String secondaryUserId,
+        @Param("type") String identityType
+    );
+}
+```
+
+#### Approach 2: Use JPA @SequenceGenerator (Recommended for Spring)
+
+```java
+@Entity
+@Table(name = "user_identities")
+public class UserIdentity {
+
+    @Id
+    @SequenceGenerator(
+        name = "preference_user_id_seq",
+        sequenceName = "seq_preference_user_id",
+        allocationSize = 1
+    )
+    @GeneratedValue(strategy = GenerationType.SEQUENCE, generator = "preference_user_id_seq")
+    @Column(name = "preference_user_id")
+    private Long preferenceUserId;
+
+    @Column(name = "primary_user_id", nullable = false)
+    private String primaryUserId;
+
+    @Column(name = "secondary_user_id")
+    private String secondaryUserId;
+
+    // ... rest of entity
+}
+
+@Entity
+@Table(name = "user_preferences")
+public class UserPreference {
+
+    @Id
+    @SequenceGenerator(
+        name = "preference_id_seq",
+        sequenceName = "seq_preference_id",
+        allocationSize = 1
+    )
+    @GeneratedValue(strategy = GenerationType.SEQUENCE, generator = "preference_id_seq")
+    @Column(name = "preference_id")
+    private Long preferenceId;
+
+    // ... rest of entity
+}
+
+@Entity
+@Table(name = "user_sortables")
+public class UserSortable {
+
+    @Id
+    @SequenceGenerator(
+        name = "sort_id_seq",
+        sequenceName = "seq_sort_id",
+        allocationSize = 1
+    )
+    @GeneratedValue(strategy = GenerationType.SEQUENCE, generator = "sort_id_seq")
+    @Column(name = "sort_id")
+    private Long sortId;
+
+    // ... rest of entity
+}
+
+@Entity
+@Table(name = "user_favorites")
+public class UserFavorite {
+
+    @Id
+    @SequenceGenerator(
+        name = "favorite_id_seq",
+        sequenceName = "seq_favorite_id",
+        allocationSize = 1
+    )
+    @GeneratedValue(strategy = GenerationType.SEQUENCE, generator = "favorite_id_seq")
+    @Column(name = "favorite_id")
+    private Long favoriteId;
+
+    // ... rest of entity
+}
+```
+
+**Advantages of Approach 2**:
+- ✅ JPA handles sequence generation automatically
+- ✅ Spring Boot recognizes named sequences
+- ✅ No manual NEXTVAL calls in code
+- ✅ allocationSize = 1 = no pre-allocation (optimal for small batches)
+
+---
+
+### Deployment Checklist for Named Sequences
+
+- [ ] Create all 4 sequences before creating tables
+- [ ] Verify sequence names match DDL exactly (case-sensitive)
+- [ ] Test INSERT operations to confirm sequence generation works
+- [ ] Monitor sequence NEXTVAL with monitoring query above
+- [ ] Document sequence values in deployment notes
+- [ ] Set up alerts if sequence allocation gap > 10% (potential issue indicator)
+- [ ] Test rollback behavior (sequences not rolled back on transaction failure - by design)
+- [ ] Verify Spring Boot entity @SequenceGenerator matches sequence names
+
+---
+
+**Document Version**: 2.3 (Added Explicit Sequence Definitions)
 **Created**: 2025-10-30
 **Last Updated**: 2025-11-03
 **Query Type**: Partner sortables, favorites, and batch operations
